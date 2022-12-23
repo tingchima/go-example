@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,40 +54,37 @@ func TestReadWriteSplitting_Basic(t *testing.T) {
 
 func TestReadWriteSplitting_Transaction(t *testing.T) {
 	ctx := context.Background()
+	userID := 1
 
-	err := adapter.Transaction(ctx, func(ctx context.Context, a *Adapter) error {
+	err := adapter.Transaction(ctx, func(ctx context.Context, tx *Adapter) error {
 		var user User
 
-		err := a.conn.Model(User{}).Where("name = ?", "name_11").First(&user).Error
+		err := tx.conn.Model(User{}).Where("id = ?", userID).Find(&user).Error
 		if err != nil {
 			return err
 		}
 
-		fmt.Printf("user: %v\n", user)
+		fmt.Printf("user before updated: %v\n", user)
 
-		err = a.conn.Model(User{ID: user.ID}).Update("name", "name_12").Error
+		err = tx.conn.Model(User{ID: user.ID}).Update("name", uuid.New().String()).Error
 		if err != nil {
 			return err
 		}
+
+		err = tx.conn.Model(User{}).Where("id = ?", user.ID).Find(&user).Error
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("user after updated: %v\n", user)
 
 		return nil
 	})
 	require.NoError(t, err)
-}
 
-func TestChannelRange(t *testing.T) {
-	var req chan struct{}
-	var reqKey uint64
+	var user User
+	err = adapter.conn.WithContext(ctx).Where("id = ?", userID).First(&user).Error
+	require.NoError(t, err)
 
-	requests := make(map[uint64]chan struct{})
-	for i := 0; i < 3; i++ {
-		requests[uint64(i+1)] = make(chan struct{})
-	}
-
-	for reqKey, req = range requests {
-		break
-	}
-
-	fmt.Printf("reqKey: %v\n", reqKey)
-	fmt.Printf("req: %v\n", req)
+	fmt.Printf("nontx-user after updated: %v\n", user)
 }

@@ -14,6 +14,18 @@ import (
 	"gorm.io/plugin/dbresolver"
 )
 
+/*
+R/W Splitting
+TODO:
+1. 確認基本使用: dbresolver 會根據 R or W 方法，自行切換 master(W) or slave(R) 連線
+2. 確認transaction: 需要讓 dbresolver 知道要開啟 R or W 連線當作 transaction 起始點，如果沒有指定會使用 master 當作連線起始點
+3. 在 R/W Splitting 下，連線池是怎麼運作的，會拿錯連線來使用嗎？
+4. R/W Splitting 延遲問題(BinLog): 要先去理解 mysql 的實作方式 (orz
+5. gorm dbresolver 壓測
+6. 讀寫分離模式與緩存服務不一致問題:
+99. others...
+*/
+
 // MustNewAdapter .
 func MustNewAdapter() *Adapter {
 	adapter, err := NewAdapter()
@@ -52,16 +64,18 @@ type Conn struct {
 	DatabaseName string
 }
 
+var (
+	mysqlDSNTemplate = "%s:%s@(%s:%s)/%s?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=UTC"
+
+	writeURL = fmt.Sprintf(mysqlDSNTemplate, "root", "1234", "127.0.0.1", "33061", "go_example")
+
+	readURL1 = fmt.Sprintf(mysqlDSNTemplate, "root", "1234", "127.0.0.1", "33062", "go_example")
+
+	readURL2 = fmt.Sprintf(mysqlDSNTemplate, "root", "1234", "127.0.0.1", "33063", "go_example")
+)
+
 // NewAdapter .
 func NewAdapter() (*Adapter, error) {
-
-	dsn := "%s:%s@(%s:%s)/%s?parseTime=true&charset=utf8mb4&collation=utf8mb4_unicode_ci&loc=UTC"
-
-	writeURL := fmt.Sprintf(dsn, "root", "1234", "127.0.0.1", "33061", "go_example")
-	readURL := fmt.Sprintf(dsn, "root", "1234", "127.0.0.1", "33062", "go_example")
-
-	// fmt.Printf("writeURL: %v\n", writeURL)
-	// fmt.Printf("readURL: %v\n", readURL)
 
 	// DB's default connection
 	conn, err := gorm.Open(mysql.Open(writeURL), &gorm.Config{})
@@ -84,12 +98,13 @@ func NewAdapter() (*Adapter, error) {
 	// use `db2`, `db3` as replicas
 	err = conn.Use(
 		dbresolver.Register(dbresolver.Config{
-			// Sources: []gorm.Dialector{
-			// 	mysql.Open(writeURL),
-			// 	// add more source db...
-			// },
+			Sources: []gorm.Dialector{
+				mysql.Open(writeURL),
+				// add more source db...
+			},
 			Replicas: []gorm.Dialector{
-				mysql.Open(readURL),
+				mysql.Open(readURL1),
+				// mysql.Open(readURL2),
 				// add more replica db...
 			},
 			Policy: dbresolver.RandomPolicy{}, // 可以客製化(參考xorm)
@@ -125,6 +140,7 @@ func New(conn *gorm.DB) *Adapter {
 // Begin .
 func (d *Adapter) Begin(ctx context.Context) *Adapter {
 	tx := d.conn.Clauses(dbresolver.Write).WithContext(ctx).Begin(&sql.TxOptions{})
+	// tx := d.conn.WithContext(ctx).Begin(&sql.TxOptions{})
 	return &Adapter{conn: tx}
 }
 
