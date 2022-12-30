@@ -8,16 +8,17 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
-var adapter *Adapter
+var repository *Repository
 
 func init() {
-	adapter = MustNewAdapter()
+	repository = MustNewRepository()
 }
 
 func TestReadWriteSplitting_Basic(t *testing.T) {
-	db := adapter.conn
+	db := repository.conn
 
 	dbCfg := db.Config
 	fmt.Printf("db config: %v\n", dbCfg)
@@ -56,9 +57,10 @@ func TestReadWriteSplitting_Transaction(t *testing.T) {
 	ctx := context.Background()
 	userID := 1
 
-	err := adapter.Transaction(ctx, func(ctx context.Context, tx *Adapter) error {
+	fmt.Println("start tx...")
+	err := repository.Transaction(ctx, func(ctx context.Context, tx *Repository) error {
 		var user User
-
+		fmt.Println("start find user...")
 		err := tx.conn.Model(User{}).Where("id = ?", userID).Find(&user).Error
 		if err != nil {
 			return err
@@ -83,7 +85,44 @@ func TestReadWriteSplitting_Transaction(t *testing.T) {
 	require.NoError(t, err)
 
 	var user User
-	err = adapter.conn.WithContext(ctx).Where("id = ?", userID).First(&user).Error
+	err = repository.conn.WithContext(ctx).Where("id = ?", userID).First(&user).Error
+	require.NoError(t, err)
+
+	fmt.Printf("nontx-user after updated: %v\n", user)
+}
+
+// Test .
+func TestReadWriteSplitting_GormTransaction(t *testing.T) {
+	userID := 1
+
+	err := repository.conn.Transaction(func(tx *gorm.DB) error {
+		var user User
+		err := tx.Model(User{}).Where("id = ?", userID).Find(&user).Error
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("user before updated: %v\n", user)
+
+		err = tx.Model(User{ID: user.ID}).Update("name", uuid.New().String()).Error
+		if err != nil {
+			return err
+		}
+
+		err = tx.Model(User{}).Where("id = ?", user.ID).Find(&user).Error
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("user after updated: %v\n", user)
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	var user User
+	var ctx = context.Background()
+	err = repository.conn.WithContext(ctx).Where("id = ?", userID).First(&user).Error
 	require.NoError(t, err)
 
 	fmt.Printf("nontx-user after updated: %v\n", user)

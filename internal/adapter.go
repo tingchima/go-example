@@ -26,9 +26,9 @@ TODO:
 99. others...
 */
 
-// MustNewAdapter .
-func MustNewAdapter() *Adapter {
-	adapter, err := NewAdapter()
+// MustNewRepository .
+func MustNewRepository() *Repository {
+	adapter, err := NewRepository()
 	if err != nil {
 		log.Fatalf("new adapter fail: %s", err.Error())
 	}
@@ -74,15 +74,71 @@ var (
 	readURL2 = fmt.Sprintf(mysqlDSNTemplate, "root", "1234", "127.0.0.1", "33063", "go_example")
 )
 
-// NewAdapter .
-func NewAdapter() (*Adapter, error) {
+// NewRepository .
+func NewRepository() (*Repository, error) {
+	// newLogger := logger.New(
+	// 	log.New(os.Stdout, "\r\n", log.LstdFlags), // io writer
+	// 	logger.Config{
+	// 		// SlowThreshold:             1 * time.Millisecond, // Slow SQL threshold
+	// 		// LogLevel:                  logger.Silent, // Log level
+	// 		IgnoreRecordNotFoundError: true, // Ignore ErrRecordNotFound error for logger
+	// 		Colorful:                  true, // Disable color
+	// 	},
+	// )
+
+	// db, mock, _ := sqlmock.New()
+	// testSuite.dbMock = mock
+	// testSuite.db, _ = gorm.Open(postgres.New(postgres.Config{
+	// 	DriverName: "postgres",
+	// 	Conn:       db,
+	// }), &gorm.Config{})
 
 	// DB's default connection
-	conn, err := gorm.Open(mysql.Open(writeURL), &gorm.Config{})
+	conn, err := gorm.Open(mysql.Open(writeURL), &gorm.Config{
+		SkipDefaultTransaction: true,
+		// PrepareStmt:            true,
+		// Logger:                 newLogger,
+	})
 	if err != nil {
 		return nil, err
 	}
 
+	// Multiple sources and replicas to use...
+	// dbresolver.Register(dbresolver.Config{}, "").Register(dbresolver.Config{})
+
+	// use `db1` as sources (DB's default connection)
+	// use `db2`, `db3` as replicas
+	err = conn.Use(
+		// resolver can register multiple configs
+		dbresolver.Register(dbresolver.Config{
+			Sources: []gorm.Dialector{
+				mysql.Open(writeURL),
+				// add more source db...
+			},
+			Replicas: []gorm.Dialector{
+				mysql.Open(readURL1),
+				mysql.Open(readURL2),
+				// add more replica db...
+			},
+			Policy: dbresolver.RandomPolicy{}, // 可以客製化(參考xorm)
+			// TraceResolverMode: true,
+		}, "secondary", "users").
+			// 會分別對 write / read connection pool 做相同設定值
+			SetMaxOpenConns(10).
+			SetMaxIdleConns(2),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// // write
+	// sqlDB, err := conn.DB()
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// sqlDB.SetMaxOpenConns(10)
+
+	// 這只會對 write(if connection is created with write url) connection pool 設定值
 	// sqlDB, err := conn.DB()
 	// if err != nil {
 	// 	return nil, err
@@ -94,26 +150,6 @@ func NewAdapter() (*Adapter, error) {
 	// // SetConnMaxLifetime sets the maximum amount of time a connection may be reused.
 	// sqlDB.SetConnMaxLifetime(time.Hour)
 
-	// use `db1` as sources (DB's default connection)
-	// use `db2`, `db3` as replicas
-	err = conn.Use(
-		dbresolver.Register(dbresolver.Config{
-			Sources: []gorm.Dialector{
-				mysql.Open(writeURL),
-				// add more source db...
-			},
-			Replicas: []gorm.Dialector{
-				mysql.Open(readURL1),
-				// mysql.Open(readURL2),
-				// add more replica db...
-			},
-			Policy: dbresolver.RandomPolicy{}, // 可以客製化(參考xorm)
-		}),
-	)
-	if err != nil {
-		return nil, err
-	}
-
 	// // sharding
 	// err = conn.Use(sharding.Register(sharding.Config{
 	// 	ShardingKey:         "user_id",
@@ -124,28 +160,30 @@ func NewAdapter() (*Adapter, error) {
 	// 	return nil, err
 	// }
 
-	return &Adapter{conn}, nil
+	return &Repository{conn}, nil
 }
 
-// Adapter .
-type Adapter struct {
+// Repository .
+type Repository struct {
 	conn *gorm.DB
 }
 
 // New .
-func New(conn *gorm.DB) *Adapter {
-	return &Adapter{conn: conn}
+func New(conn *gorm.DB) *Repository {
+	return &Repository{conn: conn}
 }
 
 // Begin .
-func (d *Adapter) Begin(ctx context.Context) *Adapter {
-	tx := d.conn.Clauses(dbresolver.Write).WithContext(ctx).Begin(&sql.TxOptions{})
+func (d *Repository) Begin(ctx context.Context) *Repository {
+	tx := d.conn.Clauses(dbresolver.Write)
+	tx = tx.Session(&gorm.Session{Context: ctx})
+	tx = tx.Begin(&sql.TxOptions{})
 	// tx := d.conn.WithContext(ctx).Begin(&sql.TxOptions{})
-	return &Adapter{conn: tx}
+	return &Repository{conn: tx}
 }
 
 // Commit .
-func (d *Adapter) Commit() error {
+func (d *Repository) Commit() error {
 	if d.conn == nil {
 		return errors.New("connection is nil")
 	}
@@ -153,7 +191,7 @@ func (d *Adapter) Commit() error {
 }
 
 // Rollback .
-func (d *Adapter) Rollback() error {
+func (d *Repository) Rollback() error {
 	if d.conn == nil {
 		return errors.New("connection is nil")
 	}
@@ -161,7 +199,7 @@ func (d *Adapter) Rollback() error {
 }
 
 // Transaction .
-func (d *Adapter) Transaction(ctx context.Context, fn func(context.Context, *Adapter) error) (txErr error) {
+func (d *Repository) Transaction(ctx context.Context, fn func(context.Context, *Repository) error) (txErr error) {
 	tx := d.Begin(ctx)
 	defer func() {
 		r := recover()
